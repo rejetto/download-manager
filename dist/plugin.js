@@ -1,17 +1,19 @@
-exports.version = 0.1
-exports.description = "Simple download manager. This version is very basic, close to an experiment."
-exports.apiRequired = 4 // real_path
+exports.version = 0.2
+exports.description = "Simple download manager, extremely basic"
+exports.apiRequired = 12.3 // config.getError
 exports.repo = "rejetto/download-manager"
+exports.changelog = [
+    { "version": 0.2, "message": "handle destination changes while running" },
+]
 
 exports.config = {
     list: {
         type: 'array',
-        minWidth: 500,
-        height: 300,
+        label: '',
         fields: {
-            url: { label: "URL" },
-            dest: { label: "Destination", type: 'real_path', files: false, folders: true, helperText: "Where to store the file" },
-            state: { disabled: true },
+            url: { label: "URL", $width: 1.5, required: true, getError: v => { try { new URL(v) } catch { return "bad syntax" } } },
+            dest: { label: "Destination", type: 'real_path', files: false, folders: true, required: true, helperText: "Where to store the file" },
+            state: { disabled: true, $width: 130, showIf: values => values.url },
         }
     }
 }
@@ -52,23 +54,57 @@ exports.init = api => {
     function startWorker(entry) {
         const { url, dest } = entry
         if (getState(url) === DONE) return
+        try { new URL(url) }
+        catch { return api.log("bad URL: " + url) }
         updateState(url, STARTED) // immediately change state, to be sure that it's not started twice
-        const worker = workers[url] = { ...entry }
+        const worker = workers[url] = { ...entry, stopping: false }
         const proto = url.startsWith('https://') ? https : http
-        proto.get(url, res => {
-            const dispo = res.headers['Content-Disposition']
+        const req = proto.get(url, res => {
+            if (worker.stopping)
+                return res.destroy()
+            if (res.statusCode < 200 || res.statusCode >= 300) {
+                res.destroy()
+                return updateState(url, Error(`HTTP ${res.statusCode}${res.statusMessage ? ' ' + res.statusMessage : ''}`))
+            }
+            const dispo = res.headers['content-disposition']
             const match = dispo && /filename[^;=\n]*=(['"])(.*?)\2|[^;\n]*/.exec(dispo)
             const filename = pathLib.basename( match?.[2] || url )
             const path = pathLib.join(dest, filename)
             api.log('download started', url)
+            worker.path = path
             const file = fs.createWriteStream(path).on("finish", () => {
+                if (worker.stopping) return
                 api.log('download finished', url)
                 file.close()
                 updateState(url, DONE)
-            }).on('error', e => updateState(url, e))
+            }).on('error', e => worker.stopping || updateState(url, e))
+            worker.file = file
+            res.on('error', e => worker.stopping || updateState(url, e))
             res.pipe(file)
             worker.response = res
-        }).on('error', e => updateState(url, e))
+        }).on('error', e => worker.stopping || updateState(url, e))
+        worker.request = req
+    }
+
+    function killWorker(worker, { removePartial }={}) {
+        if (!worker) return
+        const { url, request, response, file, path } = worker
+        worker.stopping = true
+        delete workers[url]
+        request?.destroy()
+        response?.destroy()
+        file?.destroy()
+        if (removePartial && path)
+            fs.rm(path, { force: true }, _.noop)
+    }
+
+    function moveDest(configEntry) {
+        const worker = workers[configEntry.url]
+        if (!worker) return
+        if (worker.state === DONE) return
+        api.log('moveDest', worker.dest, configEntry.dest)
+        killWorker(worker, { removePartial: true })
+        startWorker(configEntry)
     }
 
     function getState(url) {
@@ -87,18 +123,6 @@ exports.init = api => {
         const worker = workers[url]
         if (worker)
             worker.state = state
-    }
-
-    function killWorker({ url, response }) {
-        console.debug('killWorker', url)
-        delete workers[url]
-        response?.destroy()
-    }
-
-    function moveDest(configEntry) {
-        const worker = workers[configEntry.url]
-        console.debug('moveDest', worker.dest, configEntry.dest)
-        //TODO
     }
 
 }
