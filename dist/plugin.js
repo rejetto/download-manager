@@ -1,9 +1,10 @@
-exports.version = 0.2
+exports.version = 0.3
 exports.description = "Simple download manager, extremely basic"
 exports.apiRequired = 12.3 // config.getError
 exports.repo = "rejetto/download-manager"
 exports.changelog = [
-    { "version": 0.2, "message": "handle destination changes while running" },
+    { "version": 0.3, "message": "download progress" },
+    { "version": 0.2, "message": "handle destination changes while running" }
 ]
 
 exports.config = {
@@ -66,6 +67,22 @@ exports.init = api => {
                 res.destroy()
                 return updateState(url, Error(`HTTP ${res.statusCode}${res.statusMessage ? ' ' + res.statusMessage : ''}`))
             }
+            const contentLength = res.headers['content-length']
+            // Node can expose repeated headers as arrays; we still need one numeric length for progress.
+            const totalBytes = Number(Array.isArray(contentLength) ? contentLength[0] : contentLength)
+            let downloadedBytes = 0
+            let lastProgress = -1
+            if (totalBytes > 0)
+                updateState(url, '0%')
+            res.on('data', chunk => {
+                if (!totalBytes || worker.stopping) return
+                downloadedBytes += chunk.length
+                const progress = Math.floor(downloadedBytes / totalBytes * 100)
+                if (progress === lastProgress) return
+                // Avoid writing config on every chunk: only persist when visible progress changes.
+                lastProgress = progress
+                updateState(url, `${Math.min(100, progress)}%`)
+            })
             const dispo = res.headers['content-disposition']
             const match = dispo && /filename[^;=\n]*=(['"])(.*?)\2|[^;\n]*/.exec(dispo)
             const filename = pathLib.basename( match?.[2] || url )
