@@ -3,7 +3,7 @@ exports.description = "Simple download manager, extremely basic"
 exports.apiRequired = 12.3 // config.getError
 exports.repo = "rejetto/download-manager"
 exports.changelog = [
-    { "version": 0.3, "message": "download progress" },
+    { "version": 0.3, "message": "download progress + fix downloading some URLs" },
     { "version": 0.2, "message": "handle destination changes while running" }
 ]
 
@@ -55,7 +55,8 @@ exports.init = api => {
     function startWorker(entry) {
         const { url, dest } = entry
         if (getState(url) === DONE) return
-        try { new URL(url) }
+        let parsedUrl
+        try { parsedUrl = new URL(url) }
         catch { return api.log("bad URL: " + url) }
         updateState(url, STARTED) // immediately change state, to be sure that it's not started twice
         const worker = workers[url] = { ...entry, stopping: false }
@@ -85,7 +86,8 @@ exports.init = api => {
             })
             const dispo = res.headers['content-disposition']
             const match = dispo && /filename[^;=\n]*=(['"])(.*?)\2|[^;\n]*/.exec(dispo)
-            const filename = pathLib.basename( match?.[2] || url )
+            // Use only pathname for fallback: query strings can contain characters invalid for Windows filenames.
+            const filename = pathLib.basename(match?.[2] || parsedUrl.pathname) || 'download'
             const path = pathLib.join(dest, filename)
             api.log('download started', url)
             worker.path = path
