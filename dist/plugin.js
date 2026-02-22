@@ -88,9 +88,12 @@ exports.init = api => {
                 updateState(url, `${Math.min(100, progress)}%`)
             })
             const dispo = res.headers['content-disposition']
-            const match = dispo && /filename[^;=\n]*=(['"])(.*?)\2|[^;\n]*/.exec(dispo)
+            // Match filename even when the header starts with "attachment;" and support both quoted and plain values.
+            const filenameFromDispo =
+                /(?:^|;\s*)filename[^;=\n]*=(['"])(.*?)\1/i.exec(dispo)?.[2]
+                || /(?:^|;\s*)filename[^;=\n]*=([^;\n]+)/i.exec(dispo)?.[1]?.trim()
             // Use only pathname for fallback: query strings can contain characters invalid for Windows filenames.
-            const filename = pathLib.basename(match?.[2] || parsedUrl.pathname) || 'download'
+            const filename = pathLib.basename(filenameFromDispo || parsedUrl.pathname) || 'download'
             const path = pathLib.join(dest, filename)
             api.log('download started', url)
             worker.path = path
