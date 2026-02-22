@@ -10,14 +10,18 @@ exports.changelog = [
 exports.config = {
     list: {
         type: 'array',
+        width: { sm: 500, md: 700 },
         label: '',
         fields: {
             url: { label: "URL", $width: 1.5, required: true, getError: v => { try { new URL(v) } catch { return "bad syntax" } } },
-            dest: { label: "Destination", type: 'real_path', files: false, folders: true, required: true, helperText: "Where to store the file" },
-            state: { disabled: true, $width: 130, xs: 6, showIf: values => values.url },
+            dest: { label: "Destination", type: 'real_path', $hideUnder: 'lg', files: false, folders: true, required: true, helperText: "Where to store the file" },
+            state: { disabled: true, $width: 80, xs: 6 },
             checkCertificate: { type: 'boolean', xs: 6, defaultValue: true, $hideUnder: true },
         }
     }
+}
+exports.configDialog = {
+    sx: { maxWidth: '100em' },
 }
 
 const STARTED = 'started'
