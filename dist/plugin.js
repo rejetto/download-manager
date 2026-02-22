@@ -14,7 +14,8 @@ exports.config = {
         fields: {
             url: { label: "URL", $width: 1.5, required: true, getError: v => { try { new URL(v) } catch { return "bad syntax" } } },
             dest: { label: "Destination", type: 'real_path', files: false, folders: true, required: true, helperText: "Where to store the file" },
-            state: { disabled: true, $width: 130, showIf: values => values.url },
+            state: { disabled: true, $width: 130, xs: 6, showIf: values => values.url },
+            checkCertificate: { type: 'boolean', xs: 6, defaultValue: true, $hideUnder: true },
         }
     }
 }
@@ -61,7 +62,9 @@ exports.init = api => {
         updateState(url, STARTED) // immediately change state, to be sure that it's not started twice
         const worker = workers[url] = { ...entry, stopping: false }
         const proto = url.startsWith('https://') ? https : http
-        const req = proto.get(url, res => {
+        const req = proto.get(url, {
+            rejectUnauthorized: entry.checkCertificate,
+        }, res => {
             if (worker.stopping)
                 return res.destroy()
             if (res.statusCode < 200 || res.statusCode >= 300) {
