@@ -1,8 +1,9 @@
-exports.version = 0.3
+exports.version = 0.4
 exports.description = "Simple download manager, extremely basic"
 exports.apiRequired = 12.3 // config.getError
 exports.repo = "rejetto/download-manager"
 exports.changelog = [
+    { "version": 0.4, "message": "support redirections" },
     { "version": 0.3, "message": "download progress + fix downloading some URLs" },
     { "version": 0.2, "message": "handle destination changes while running" }
 ]
@@ -48,7 +49,7 @@ exports.init = api => {
         if (list) for (const entry of list) {
             const worker = workers[entry.url]
             if (!worker)
-                startWorker(entry)
+                void startWorker(entry)
             else if (entry.dest !== worker.dest)
                 moveDest(entry)
         }
@@ -57,62 +58,86 @@ exports.init = api => {
                 killWorker(workers[url])
     }
 
-    function startWorker(entry) {
+    async function startWorker(entry) {
         const { url, dest } = entry
         if (getState(url) === DONE) return
-        let parsedUrl
-        try { parsedUrl = new URL(url) }
+        try { new URL(url) }
         catch { return api.log("bad URL: " + url) }
         updateState(url, STARTED) // immediately change state, to be sure that it's not started twice
         const worker = workers[url] = { ...entry, stopping: false }
-        const proto = url.startsWith('https://') ? https : http
-        const req = proto.get(url, {
-            rejectUnauthorized: entry.checkCertificate,
-        }, res => {
-            if (worker.stopping)
-                return res.destroy()
-            if (res.statusCode < 200 || res.statusCode >= 300) {
-                res.destroy()
-                return updateState(url, Error(`HTTP ${res.statusCode}${res.statusMessage ? ' ' + res.statusMessage : ''}`))
+        let currentUrl = url
+        let redirectsCount = 0
+        while (true) {
+            try {
+                const parsedUrl = new URL(currentUrl)
+                const res = await new Promise((resolve, reject) => {
+                    const proto = parsedUrl.protocol === 'https:' ? https : http
+                    const req = proto.get(currentUrl, {
+                        rejectUnauthorized: entry.checkCertificate,
+                    }, resolve).on('error', reject)
+                    worker.request = req
+                })
+                if (worker.stopping)
+                    return res.destroy()
+                if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                    // cap redirects to avoid infinite loops from bad upstream configurations
+                    if (redirectsCount >= 10) {
+                        res.destroy()
+                        return updateState(url, Error('too many redirects'))
+                    }
+                    currentUrl = new URL(res.headers.location, currentUrl).toString()
+                    redirectsCount += 1
+                    res.destroy()
+                    continue
+                }
+                if (res.statusCode < 200 || res.statusCode >= 300) {
+                    res.destroy()
+                    return updateState(url, Error(`HTTP ${res.statusCode}${res.statusMessage ? ' ' + res.statusMessage : ''}`))
+                }
+                const contentLength = res.headers['content-length']
+                // Node can expose repeated headers as arrays; we still need one numeric length for progress.
+                const totalBytes = Number(Array.isArray(contentLength) ? contentLength[0] : contentLength)
+                let downloadedBytes = 0
+                let lastProgress = -1
+                if (totalBytes > 0)
+                    updateState(url, '0%')
+                res.on('data', chunk => {
+                    if (!totalBytes || worker.stopping) return
+                    downloadedBytes += chunk.length
+                    const progress = Math.floor(downloadedBytes / totalBytes * 100)
+                    if (progress === lastProgress) return
+                    // Avoid writing config on every chunk: only persist when visible progress changes.
+                    lastProgress = progress
+                    updateState(url, `${Math.min(100, progress)}%`)
+                })
+                const dispo = res.headers['content-disposition']
+                // Match filename even when the header starts with "attachment;" and support both quoted and plain values.
+                const filenameFromDispo =
+                    /(?:^|;\s*)filename[^;=\n]*=(['"])(.*?)\1/i.exec(dispo)?.[2]
+                    || /(?:^|;\s*)filename[^;=\n]*=([^;\n]+)/i.exec(dispo)?.[1]?.trim()
+                // Use only pathname for fallback: query strings can contain characters invalid for Windows filenames.
+                const filename = pathLib.basename(filenameFromDispo || parsedUrl.pathname) || 'download'
+                const path = pathLib.join(dest, filename)
+                api.log('download started', url)
+                worker.path = path
+                const file = fs.createWriteStream(path).on("finish", () => {
+                    if (worker.stopping) return
+                    api.log('download finished', url)
+                    file.close()
+                    updateState(url, DONE)
+                }).on('error', e => worker.stopping || updateState(url, e))
+                worker.file = file
+                res.on('error', e => worker.stopping || updateState(url, e))
+                res.pipe(file)
+                worker.response = res
+                return
             }
-            const contentLength = res.headers['content-length']
-            // Node can expose repeated headers as arrays; we still need one numeric length for progress.
-            const totalBytes = Number(Array.isArray(contentLength) ? contentLength[0] : contentLength)
-            let downloadedBytes = 0
-            let lastProgress = -1
-            if (totalBytes > 0)
-                updateState(url, '0%')
-            res.on('data', chunk => {
-                if (!totalBytes || worker.stopping) return
-                downloadedBytes += chunk.length
-                const progress = Math.floor(downloadedBytes / totalBytes * 100)
-                if (progress === lastProgress) return
-                // Avoid writing config on every chunk: only persist when visible progress changes.
-                lastProgress = progress
-                updateState(url, `${Math.min(100, progress)}%`)
-            })
-            const dispo = res.headers['content-disposition']
-            // Match filename even when the header starts with "attachment;" and support both quoted and plain values.
-            const filenameFromDispo =
-                /(?:^|;\s*)filename[^;=\n]*=(['"])(.*?)\1/i.exec(dispo)?.[2]
-                || /(?:^|;\s*)filename[^;=\n]*=([^;\n]+)/i.exec(dispo)?.[1]?.trim()
-            // Use only pathname for fallback: query strings can contain characters invalid for Windows filenames.
-            const filename = pathLib.basename(filenameFromDispo || parsedUrl.pathname) || 'download'
-            const path = pathLib.join(dest, filename)
-            api.log('download started', url)
-            worker.path = path
-            const file = fs.createWriteStream(path).on("finish", () => {
-                if (worker.stopping) return
-                api.log('download finished', url)
-                file.close()
-                updateState(url, DONE)
-            }).on('error', e => worker.stopping || updateState(url, e))
-            worker.file = file
-            res.on('error', e => worker.stopping || updateState(url, e))
-            res.pipe(file)
-            worker.response = res
-        }).on('error', e => worker.stopping || updateState(url, e))
-        worker.request = req
+            catch (e) {
+                if (!worker.stopping)
+                    updateState(url, e)
+                return
+            }
+        }
     }
 
     function killWorker(worker, { removePartial }={}) {
@@ -133,7 +158,7 @@ exports.init = api => {
         if (worker.state === DONE) return
         api.log('moveDest', worker.dest, configEntry.dest)
         killWorker(worker, { removePartial: true })
-        startWorker(configEntry)
+        void startWorker(configEntry)
     }
 
     function getState(url) {
